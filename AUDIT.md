@@ -202,3 +202,48 @@ The critical problem is **time-to-first-value is way too high**. A new user face
 Secondary issues are the manual-only keyword/link tracking (users expect some automation) and the misleading "Integrations" section (guides, not connections). These are less urgent but set incorrect expectations.
 
 **Bottom line:** 2-3 hours of work on items #1-4 would dramatically improve the first-run experience. The rest is polish.
+
+---
+
+## Fixes Applied
+
+**Date:** 2026-02-11
+**Implemented by:** AI Subagent
+
+### Critical — Time-to-First-Value
+1. ✅ **Dashboard hero URL input** — New users see a prominent "Check your website's SEO health" card with URL input. Paste URL → see results immediately. One step to first value.
+2. ✅ **BOOTSTRAP.md compressed to 2 questions** — Reduced from 10 questions to just URL + CMS. AI runs audit immediately after getting URL, then asks follow-ups later as needed.
+3. ✅ **Auto-create site from quick-check** — `saveLastQuickCheck()` auto-creates a site entry if none exists, eliminating the need to visit Settings first.
+4. ✅ **Mobile hamburger menu** — Added hamburger button, sidebar overlay, and toggle logic. Mobile users can now navigate all pages. Sidebar closes on navigation.
+
+### High Impact — User Experience
+5. ✅ **Empty state CTAs on every page** — Issues, Keywords, Links, Content pages now show helpful guidance with action buttons when empty instead of dead-end blank states.
+6. ✅ **Loading spinner component** — Added `spinner()` and `loadingCard()` helpers. Every page shows a spinner during API calls.
+7. ✅ **"Integrations" renamed to "Setup Guides"** — Nav label, page title, subtitle, and card labels all updated to clarify these are instructions, not OAuth connections. Added info banners.
+8. ✅ **Confirmation dialogs on all delete actions** — `confirmAction()` promise-based dialog added. Delete keyword, delete link, and reset-all-data all require confirmation.
+9. ✅ **Dynamic content suggestions** — Server now reads site domain and tracked keywords to populate suggestion titles instead of `[Your Primary Keyword]` placeholders.
+
+### Medium Impact — Features
+10. ✅ **Re-audit button on dashboard** — When a site exists, dashboard shows "Re-audit {domain}" button for one-click score refresh.
+11. ✅ **Bulk delete endpoint** — Added `POST /api/bulk-delete` for efficient mass deletion. `clearAllData` now uses bulk delete instead of individual API calls in a loop.
+12. ✅ **Removed multer** — Dead dependency removed from package.json.
+
+### Security Fixes
+13. ✅ **SSRF protection** — Added `isPrivateIP()` and `validateUrl()` on the server. Quick-check endpoint now rejects private IPs (127.x, 10.x, 172.16-31.x, 192.168.x, 169.254.x, cloud metadata endpoints), non-HTTP protocols, and invalid URLs.
+14. ✅ **XSS fix in saveQuickCheckAsAudit** — Eliminated `JSON.stringify` in onclick attribute. Quick-check results are now stored in a module-level variable (`_lastQuickCheckResult`) and referenced safely via `saveLastQuickCheck()`.
+15. ✅ **Server-side input validation** — Added `validateRequired()` middleware. POST `/api/issues` requires title, POST `/api/keywords` requires keyword, POST `/api/sites` validates URL format.
+16. ✅ **URL auto-prefix** — Client-side quick-check auto-prepends `https://` if user omits protocol.
+
+### Code Quality
+17. ✅ **Toast notification system** — Added `showToast()` with success/error/info types, animated slide-in, auto-dismiss. Used for all save/delete/error feedback.
+18. ✅ **Error handling on all API calls** — `api.get/post/put/del` all have try/catch with error response parsing and toast display. Every page render has try/catch with error state UI.
+19. ✅ **DELETE endpoints also support URL params** — Added `/:id` param-based DELETE routes alongside legacy body-based ones for better proxy compatibility.
+20. ✅ **Responsive mobile improvements** — Added mobile breakpoints for quick-check bar, hero input, flex-between, and btn-group. Dashboard gets top padding for hamburger button.
+
+### Not Addressed (out of scope for this pass)
+- SQLite migration (works fine with JSON for current scale)
+- Actual API integrations (GA4, GSC, SEMrush, Ahrefs OAuth)
+- Scheduled/recurring audits
+- Export to CSV/PDF
+- Competitor analysis feature
+- node-fetch v2→v3 migration (v2 still works, v3 requires ESM)

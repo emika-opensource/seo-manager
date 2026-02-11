@@ -3,6 +3,8 @@ const cors = require('cors');
 const fs = require('fs-extra');
 const path = require('path');
 const fetch = require('node-fetch');
+const { URL } = require('url');
+const net = require('net');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -31,13 +33,48 @@ function saveConfig(cfg) {
 }
 function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 
+// ─── SSRF Protection ───
+function isPrivateIP(hostname) {
+  // Block private/internal IPs and cloud metadata endpoints
+  const blocked = [
+    /^localhost$/i, /^127\./, /^10\./, /^172\.(1[6-9]|2[0-9]|3[01])\./, /^192\.168\./,
+    /^169\.254\./, /^0\./, /^fc00:/i, /^fe80:/i, /^::1$/, /^fd/i,
+    /^metadata\.google\.internal$/i, /^metadata\.internal$/i
+  ];
+  return blocked.some(re => re.test(hostname));
+}
+
+function validateUrl(urlStr) {
+  let parsed;
+  try { parsed = new URL(urlStr); } catch { return { valid: false, error: 'Invalid URL format' }; }
+  if (!['http:', 'https:'].includes(parsed.protocol)) return { valid: false, error: 'Only HTTP/HTTPS URLs allowed' };
+  if (isPrivateIP(parsed.hostname)) return { valid: false, error: 'Internal/private URLs are not allowed' };
+  return { valid: true, parsed };
+}
+
+// ─── Input Validation ───
+function validateRequired(fields, body) {
+  for (const f of fields) {
+    if (!body[f] || (typeof body[f] === 'string' && !body[f].trim())) {
+      return `${f} is required`;
+    }
+  }
+  return null;
+}
+
 // ─── SITES ───
 app.get('/api/sites', (req, res) => res.json(loadData('sites.json')));
 app.post('/api/sites', (req, res) => {
   const sites = loadData('sites.json');
+  let domain = '';
+  if (req.body.url) {
+    const v = validateUrl(req.body.url);
+    if (!v.valid) return res.status(400).json({ error: v.error });
+    domain = v.parsed.hostname;
+  }
   const site = {
-    id: genId(), name: req.body.name || '', url: req.body.url || '',
-    domain: req.body.domain || (req.body.url ? new URL(req.body.url).hostname : ''),
+    id: genId(), name: req.body.name || domain || '', url: req.body.url || '',
+    domain: req.body.domain || domain,
     cms: req.body.cms || 'custom', currentScore: req.body.currentScore || 0,
     previousScore: 0, scoreHistory: [], lastAudit: null,
     integrations: { googleAnalytics: false, searchConsole: false, semrush: false },
@@ -55,6 +92,13 @@ app.put('/api/sites', (req, res) => {
   saveData('sites.json', sites);
   res.json(sites[idx]);
 });
+app.delete('/api/sites/:id', (req, res) => {
+  let sites = loadData('sites.json');
+  sites = sites.filter(s => s.id !== req.params.id);
+  saveData('sites.json', sites);
+  res.json({ ok: true });
+});
+// Keep legacy body-based delete for backward compat
 app.delete('/api/sites', (req, res) => {
   let sites = loadData('sites.json');
   sites = sites.filter(s => s.id !== req.body.id);
@@ -106,6 +150,11 @@ app.post('/api/audits', (req, res) => {
 app.post('/api/audits/quick-check', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'URL required' });
+
+  // SSRF protection
+  const v = validateUrl(url);
+  if (!v.valid) return res.status(400).json({ error: v.error });
+
   try {
     const startTime = Date.now();
     const response = await fetch(url, {
@@ -236,6 +285,8 @@ app.get('/api/issues', (req, res) => {
   res.json(issues);
 });
 app.post('/api/issues', (req, res) => {
+  const err = validateRequired(['title'], req.body);
+  if (err) return res.status(400).json({ error: err });
   const issues = loadData('issues.json');
   const issue = {
     id: genId(), siteId: req.body.siteId || '', auditId: req.body.auditId || null,
@@ -259,11 +310,30 @@ app.put('/api/issues', (req, res) => {
   saveData('issues.json', issues);
   res.json(issues[idx]);
 });
+app.delete('/api/issues/:id', (req, res) => {
+  let issues = loadData('issues.json');
+  issues = issues.filter(i => i.id !== req.params.id);
+  saveData('issues.json', issues);
+  res.json({ ok: true });
+});
 app.delete('/api/issues', (req, res) => {
   let issues = loadData('issues.json');
   issues = issues.filter(i => i.id !== req.body.id);
   saveData('issues.json', issues);
   res.json({ ok: true });
+});
+
+// Bulk delete endpoint
+app.post('/api/bulk-delete', (req, res) => {
+  const { resource, ids } = req.body;
+  const validResources = ['sites', 'audits', 'issues', 'content', 'keywords', 'links'];
+  if (!validResources.includes(resource)) return res.status(400).json({ error: 'Invalid resource' });
+  if (!Array.isArray(ids)) return res.status(400).json({ error: 'ids must be an array' });
+  const file = `${resource}.json`;
+  let data = loadData(file);
+  data = data.filter(item => !ids.includes(item.id));
+  saveData(file, data);
+  res.json({ ok: true, deleted: ids.length });
 });
 
 // ─── CONTENT ───
@@ -295,6 +365,12 @@ app.put('/api/content', (req, res) => {
   saveData('content.json', content);
   res.json(content[idx]);
 });
+app.delete('/api/content/:id', (req, res) => {
+  let content = loadData('content.json');
+  content = content.filter(c => c.id !== req.params.id);
+  saveData('content.json', content);
+  res.json({ ok: true });
+});
 app.delete('/api/content', (req, res) => {
   let content = loadData('content.json');
   content = content.filter(c => c.id !== req.body.id);
@@ -316,15 +392,12 @@ app.post('/api/content/analyze', (req, res) => {
   let score = 50;
   const feedback = [];
 
-  // Word count
   if (wordCount > 1500) { score += 10; feedback.push({ type: 'good', msg: `Good content length (${wordCount} words)` }); }
   else if (wordCount > 800) { score += 5; feedback.push({ type: 'ok', msg: `Decent length (${wordCount} words), aim for 1500+` }); }
   else { feedback.push({ type: 'bad', msg: `Content too short (${wordCount} words), aim for 1500+` }); score -= 10; }
 
-  // Readability (simple Flesch-like)
   const readability = Math.max(0, Math.min(100, 206.835 - 1.015 * avgWordsPerSentence));
 
-  // Keyword density
   const kwDensities = [];
   if (targetKeywords && targetKeywords.length > 0) {
     targetKeywords.forEach(kw => {
@@ -340,25 +413,21 @@ app.post('/api/content/analyze', (req, res) => {
     });
   }
 
-  // Headings
   const h1Count = (content.match(/^#\s/gm) || []).length + (content.match(/<h1/gi) || []).length;
   const h2Count = (content.match(/^##\s/gm) || []).length + (content.match(/<h2/gi) || []).length;
   if (h2Count >= 2) { score += 5; feedback.push({ type: 'good', msg: `Good heading structure (${h2Count} H2s)` }); }
   else { feedback.push({ type: 'bad', msg: 'Add more H2 headings for structure' }); score -= 5; }
 
-  // Meta title
   if (metaTitle) {
     if (metaTitle.length <= 60 && metaTitle.length >= 30) { score += 5; feedback.push({ type: 'good', msg: 'Meta title length is optimal' }); }
     else { feedback.push({ type: 'ok', msg: `Meta title is ${metaTitle.length} chars (aim for 30-60)` }); }
   } else { score -= 5; feedback.push({ type: 'bad', msg: 'Missing meta title' }); }
 
-  // Meta description
   if (metaDescription) {
     if (metaDescription.length <= 160 && metaDescription.length >= 120) { score += 5; feedback.push({ type: 'good', msg: 'Meta description length is optimal' }); }
     else { feedback.push({ type: 'ok', msg: `Meta description is ${metaDescription.length} chars (aim for 120-160)` }); }
   } else { score -= 5; feedback.push({ type: 'bad', msg: 'Missing meta description' }); }
 
-  // Links
   const linkCount = (content.match(/\[.*?\]\(.*?\)/g) || []).length + (content.match(/<a\s/gi) || []).length;
   if (linkCount >= 3) { score += 5; feedback.push({ type: 'good', msg: `Good internal/external linking (${linkCount} links)` }); }
   else { feedback.push({ type: 'ok', msg: 'Add more internal and external links' }); }
@@ -369,13 +438,22 @@ app.post('/api/content/analyze', (req, res) => {
 });
 
 app.get('/api/content/suggestions', (req, res) => {
+  // Try to use site data for dynamic suggestions
+  const sites = loadData('sites.json');
+  const keywords = loadData('keywords.json');
+  const site = sites[0];
+  const domain = site?.domain || 'your site';
+  const topKw = keywords.slice(0, 3).map(k => k.keyword).filter(Boolean);
+  const primaryKw = topKw[0] || 'your primary keyword';
+  const secondaryKw = topKw[1] || 'your topic';
+
   res.json([
-    { title: 'Ultimate Guide to [Your Primary Keyword]', type: 'pillar-page', reason: 'Pillar content establishes topical authority' },
-    { title: 'How to [Solve Common Problem] in 2026', type: 'blog-post', reason: 'How-to content ranks well and gets AI citations' },
-    { title: '[Your Product] vs [Competitor]: Complete Comparison', type: 'blog-post', reason: 'Comparison content captures commercial intent keywords' },
-    { title: 'FAQ: Everything About [Topic]', type: 'faq', reason: 'FAQ pages with schema markup get featured snippets and AI citations' },
-    { title: '[Industry] Statistics and Trends 2026', type: 'blog-post', reason: 'Data-driven content earns backlinks and citations' },
-    { title: 'Step-by-Step [Process] Tutorial', type: 'blog-post', reason: 'Tutorial content with HowTo schema ranks for long-tail queries' }
+    { title: `Ultimate Guide to ${primaryKw}`, type: 'pillar-page', reason: 'Pillar content establishes topical authority' },
+    { title: `How to ${secondaryKw} in 2026`, type: 'blog-post', reason: 'How-to content ranks well and gets AI citations' },
+    { title: `${primaryKw}: Complete Comparison Guide`, type: 'blog-post', reason: 'Comparison content captures commercial intent keywords' },
+    { title: `FAQ: Everything About ${primaryKw}`, type: 'faq', reason: 'FAQ pages with schema markup get featured snippets and AI citations' },
+    { title: `${secondaryKw} Statistics and Trends 2026`, type: 'blog-post', reason: 'Data-driven content earns backlinks and citations' },
+    { title: `Step-by-Step ${primaryKw} Tutorial`, type: 'blog-post', reason: 'Tutorial content with HowTo schema ranks for long-tail queries' }
   ]);
 });
 
@@ -386,6 +464,8 @@ app.get('/api/keywords', (req, res) => {
   res.json(kws);
 });
 app.post('/api/keywords', (req, res) => {
+  const err = validateRequired(['keyword'], req.body);
+  if (err) return res.status(400).json({ error: err });
   const kws = loadData('keywords.json');
   const kw = {
     id: genId(), siteId: req.body.siteId || '', keyword: req.body.keyword || '',
@@ -398,6 +478,12 @@ app.post('/api/keywords', (req, res) => {
   kws.push(kw);
   saveData('keywords.json', kws);
   res.json(kw);
+});
+app.delete('/api/keywords/:id', (req, res) => {
+  let kws = loadData('keywords.json');
+  kws = kws.filter(k => k.id !== req.params.id);
+  saveData('keywords.json', kws);
+  res.json({ ok: true });
 });
 app.delete('/api/keywords', (req, res) => {
   let kws = loadData('keywords.json');
@@ -443,6 +529,12 @@ app.put('/api/links', (req, res) => {
   links[idx] = { ...links[idx], ...req.body };
   saveData('links.json', links);
   res.json(links[idx]);
+});
+app.delete('/api/links/:id', (req, res) => {
+  let links = loadData('links.json');
+  links = links.filter(l => l.id !== req.params.id);
+  saveData('links.json', links);
+  res.json({ ok: true });
 });
 app.delete('/api/links', (req, res) => {
   let links = loadData('links.json');
@@ -526,7 +618,7 @@ app.get('/api/integrations/guides', (req, res) => {
       setupSteps: ['Project Settings > SEO > set global title/description', 'Pages panel > set per-page SEO title, description, OG image', 'CMS Collections > configure SEO fields', 'Project Settings > Custom Code > add schema/analytics', 'Hosting > 301 Redirects for URL changes', 'Hosting > Sitemap > auto-generated', 'Project Settings > Integrations > add GA/GSC'],
       apiEndpoints: ['Webflow CMS API v2', 'Collections API', 'Items API', 'Webhooks for content changes'],
       features: ['Visual SEO editing per page', 'Auto sitemap generation', 'Auto canonical tags', 'Custom code injection (head/body)', 'CMS-driven dynamic pages', '301 redirect management', 'Open Graph settings per page'],
-      bestPractices: ['Use CMS collections for scalable content', 'Set unique SEO titles per collection item', 'Add JSON-LD schema in custom code', 'Use Webflow\'s image optimization (auto WebP)', 'Create 301 redirects for all URL changes', 'Use clean URL slugs with keywords']
+      bestPractices: ['Use CMS collections for scalable content', 'Set unique SEO titles per collection item', 'Add JSON-LD schema in custom code', "Use Webflow's image optimization (auto WebP)", 'Create 301 redirects for all URL changes', 'Use clean URL slugs with keywords']
     },
     {
       platform: 'wix', name: 'Wix', type: 'cms',
