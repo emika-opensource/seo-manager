@@ -265,6 +265,146 @@ app.post('/api/audits/quick-check', async (req, res) => {
   }
 });
 
+// ─── AUDIT HTML REPORT ───
+app.get('/api/audits/:id/report', (req, res) => {
+  const audits = loadData('audits.json');
+  const audit = audits.find(x => x.id === req.params.id);
+  if (!audit) return res.status(404).send('Audit not found');
+  const sites = loadData('sites.json');
+  const site = sites.find(s => s.id === audit.siteId);
+  const siteName = site ? site.name : 'Unknown Site';
+  const siteUrl = site ? site.url : '';
+  res.send(renderAuditHTML(audit, siteName, siteUrl));
+});
+
+app.post('/api/audits/report', (req, res) => {
+  const data = req.body;
+  if (!data) return res.status(400).json({ error: 'Audit data required' });
+  res.send(renderAuditHTML(data, data.siteName || data.url || 'SEO Audit', data.url || ''));
+});
+
+function renderAuditHTML(audit, siteName, siteUrl) {
+  const score = audit.score || 0;
+  const cats = audit.categories || {};
+  const date = audit.createdAt ? new Date(audit.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) : new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const scoreColor = s => s >= 80 ? '#22c55e' : s >= 60 ? '#eab308' : s >= 40 ? '#f97316' : '#ef4444';
+  const sevColor = s => ({ critical: '#ef4444', high: '#f97316', medium: '#eab308', low: '#6b7280' })[s] || '#6b7280';
+  const catLabel = c => ({ technical: 'Technical SEO', content: 'Content Quality', onPage: 'On-Page SEO', offPage: 'Off-Page SEO', performance: 'Performance', aeo: 'AEO / AI Optimization' })[c] || c;
+  const catIcon = c => ({ technical: '⚙️', content: '📝', onPage: '🏷️', offPage: '🔗', performance: '⚡', aeo: '🤖' })[c] || '📊';
+
+  let categorySections = '';
+  for (const [key, cat] of Object.entries(cats)) {
+    const catScore = cat.score || 0;
+    const issues = cat.issues || [];
+    let issueRows = '';
+    if (issues.length === 0) {
+      issueRows = '';
+    } else {
+      issues.forEach(issue => {
+        issueRows += `<tr>
+          <td><span style="display:inline-flex;align-items:center;gap:6px;"><span style="color:${sevColor(issue.severity)};font-size:10px;">●</span> <span style="text-transform:capitalize;font-weight:500;color:${sevColor(issue.severity)}">${issue.severity || 'info'}</span></span></td>
+          <td style="font-weight:500;">${esc(issue.title)}</td>
+          <td style="color:#9ca3af;">${esc(issue.fix || issue.recommendation || '')}</td>
+        </tr>`;
+      });
+    }
+    categorySections += `
+      <div class="cat-card">
+        <div class="cat-header">
+          <div class="cat-title">${catIcon(key)} ${catLabel(key)}</div>
+          <div class="cat-score" style="color:${scoreColor(catScore)}">${catScore}<span class="score-max">/100</span></div>
+        </div>
+        <div class="score-bar"><div class="score-fill" style="width:${catScore}%;background:${scoreColor(catScore)}"></div></div>
+        ${issues.length > 0 ? `<table class="issues-table">
+          <thead><tr><th style="width:100px;">Severity</th><th>Issue</th><th>Recommendation</th></tr></thead>
+          <tbody>${issueRows}</tbody>
+        </table>` : `<div style="text-align:center;color:#4ade80;padding:16px 0;">✓ No issues found</div>`}
+      </div>`;
+  }
+
+  const summary = audit.summary || '';
+  const totalIssues = Object.values(cats).reduce((sum, c) => sum + (c.issues || []).length, 0);
+  const criticals = Object.values(cats).reduce((sum, c) => sum + (c.issues || []).filter(i => i.severity === 'critical').length, 0);
+  const highs = Object.values(cats).reduce((sum, c) => sum + (c.issues || []).filter(i => i.severity === 'high').length, 0);
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SEO Audit Report — ${esc(siteName)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#06060a;color:#e5e5e5;min-height:100vh}
+  .container{max-width:900px;margin:0 auto;padding:40px 24px}
+  .header{text-align:center;margin-bottom:40px;padding-bottom:32px;border-bottom:1px solid #1a1a2e}
+  .header h1{font-size:28px;font-weight:700;color:#fff;margin-bottom:8px}
+  .header .site-url{color:#22c55e;font-size:14px;text-decoration:none}
+  .header .site-url:hover{text-decoration:underline}
+  .header .date{color:#6b7280;font-size:13px;margin-top:8px}
+  .score-hero{display:flex;align-items:center;justify-content:center;gap:32px;margin:32px 0;flex-wrap:wrap}
+  .score-ring{position:relative;width:140px;height:140px}
+  .score-ring svg{transform:rotate(-90deg)}
+  .score-ring .score-value{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:42px;font-weight:700}
+  .score-ring .score-label{position:absolute;top:50%;left:50%;transform:translate(-50%,calc(-50% + 24px));font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:1px}
+  .stats-grid{display:flex;gap:16px;flex-wrap:wrap;justify-content:center}
+  .stat{background:#0d0d14;border:1px solid #1a1a2e;border-radius:12px;padding:16px 24px;text-align:center;min-width:120px}
+  .stat .stat-value{font-size:28px;font-weight:700}
+  .stat .stat-label{font-size:12px;color:#6b7280;margin-top:4px;text-transform:uppercase;letter-spacing:.5px}
+  .summary{background:#0d0d14;border:1px solid #1a1a2e;border-radius:12px;padding:24px;margin:32px 0;line-height:1.7;color:#9ca3af}
+  .summary strong{color:#e5e5e5}
+  .cat-card{background:#0d0d14;border:1px solid #1a1a2e;border-radius:12px;margin-bottom:16px;overflow:hidden}
+  .cat-header{display:flex;align-items:center;justify-content:space-between;padding:20px 24px 12px}
+  .cat-title{font-size:16px;font-weight:600;color:#fff}
+  .cat-score{font-size:24px;font-weight:700}
+  .score-max{font-size:13px;color:#6b7280;font-weight:400}
+  .score-bar{height:4px;background:#1a1a2e;margin:0 24px 16px;border-radius:2px}
+  .score-fill{height:100%;border-radius:2px;transition:width .5s}
+  .issues-table{width:100%;border-collapse:collapse}
+  .issues-table thead{background:#0a0a12}
+  .issues-table th{padding:10px 16px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6b7280;text-align:left;font-weight:600;border-top:1px solid #1a1a2e}
+  .issues-table td{padding:12px 16px;font-size:13px;border-top:1px solid #111122;vertical-align:top;line-height:1.5}
+  .issues-table tbody tr:hover{background:#0a0a12}
+  .footer{text-align:center;padding:40px 0 20px;color:#4b5563;font-size:12px;border-top:1px solid #1a1a2e;margin-top:40px}
+  .footer a{color:#22c55e;text-decoration:none}
+  @media print{body{background:#fff;color:#111}.container{max-width:100%}.cat-card,.stat,.summary{border-color:#e5e7eb;background:#f9fafb}.issues-table thead{background:#f3f4f6}.issues-table td,.issues-table th{border-color:#e5e7eb}.cat-title,.header h1,.score-ring .score-value{color:#111}.footer{color:#9ca3af}}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>SEO Audit Report</h1>
+    <div style="font-size:20px;font-weight:500;color:#fff;margin:4px 0">${esc(siteName)}</div>
+    ${siteUrl ? `<a class="site-url" href="${esc(siteUrl)}" target="_blank">${esc(siteUrl)}</a>` : ''}
+    <div class="date">${date}</div>
+  </div>
+  <div class="score-hero">
+    <div class="score-ring">
+      <svg width="140" height="140" viewBox="0 0 140 140">
+        <circle cx="70" cy="70" r="60" fill="none" stroke="#1a1a2e" stroke-width="10"/>
+        <circle cx="70" cy="70" r="60" fill="none" stroke="${scoreColor(score)}" stroke-width="10" stroke-dasharray="${(score/100)*377} 377" stroke-linecap="round"/>
+      </svg>
+      <div class="score-value" style="color:${scoreColor(score)}">${score}</div>
+      <div class="score-label">Overall</div>
+    </div>
+    <div class="stats-grid">
+      <div class="stat"><div class="stat-value">${totalIssues}</div><div class="stat-label">Total Issues</div></div>
+      <div class="stat"><div class="stat-value" style="color:#ef4444">${criticals}</div><div class="stat-label">Critical</div></div>
+      <div class="stat"><div class="stat-value" style="color:#f97316">${highs}</div><div class="stat-label">High</div></div>
+    </div>
+  </div>
+  ${summary ? `<div class="summary">${summary.replace(/\n/g,'<br>')}</div>` : ''}
+  ${categorySections}
+  <div class="footer">Generated by <a href="https://emika.ai">Emika</a> SEO Manager &mdash; ${date}</div>
+</div>
+</body>
+</html>`;
+}
+
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
 // ─── ISSUES ───
 app.get('/api/issues/summary', (req, res) => {
   const issues = loadData('issues.json');
